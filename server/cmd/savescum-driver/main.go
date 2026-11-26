@@ -224,7 +224,7 @@ func runFutureWatchWorker(ctx context.Context, members []*memberClient, maxCommi
 
 		m := members[savescum.RandomU32()%uint32(len(members))]
 		committed := maxCommittedRev.Load()
-		offsets := []int64{5, 30, 120}
+		offsets := []int64{30, 200, 500}
 		offset := offsets[savescum.RandomU32()%uint32(len(offsets))]
 		startRev := committed + offset
 

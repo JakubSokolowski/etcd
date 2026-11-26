@@ -91,7 +91,7 @@ services:
       savescum.setup_complete: manual
       savescum.faults.target: "false"
       savescum.faults.swarm: "true"
-      savescum.faults.power_loss_volume_mib: "64"
+      savescum.faults.power_loss_volume_mib: "128"
 
 volumes:
   etcd1_data: {}
