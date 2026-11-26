@@ -15,12 +15,14 @@
 package mvcc
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/pkg/v3/traceutil"
 	"go.etcd.io/etcd/server/v3/lease"
+	"go.etcd.io/etcd/server/v3/savescum"
 	"go.etcd.io/etcd/server/v3/storage/backend"
 	"go.etcd.io/etcd/server/v3/storage/schema"
 
@@ -198,6 +200,10 @@ func (s *watchableStore) Restore(b backend.Backend) error {
 	if err != nil {
 		return err
 	}
+
+	savescum.Reachable("etcd_mvcc_watch_restore")
+	savescum.Maximize("etcd_mvcc_restore_synced_watchers", int64(len(s.synced.watchers)))
+	savescum.Explore("etcd_mvcc_watch_restore_state", fmt.Sprintf("synced_%d_unsynced_%d", len(s.synced.watchers), len(s.unsynced.watchers)))
 
 	for wa := range s.synced.watchers {
 		wa.restore = true
