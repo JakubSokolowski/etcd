@@ -224,10 +224,11 @@ func runFutureWatchWorker(ctx context.Context, members []*memberClient, maxCommi
 
 		m := members[savescum.RandomU32()%uint32(len(members))]
 		committed := maxCommittedRev.Load()
-		offset := int64(1 + (savescum.RandomU32() % 6))
+		offsets := []int64{5, 30, 120}
+		offset := offsets[savescum.RandomU32()%uint32(len(offsets))]
 		startRev := committed + offset
 
-		wctx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+		wctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 		wch := m.cli.Watch(wctx, "k/", clientv3.WithPrefix(), clientv3.WithRev(startRev))
 		for resp := range wch {
 			if resp.Err() != nil {
@@ -343,7 +344,7 @@ func runLinearizableReader(
 		key := fmt.Sprintf("k/%d", savescum.RandomU32()%uint32(keySpace))
 		floorRev := maxCommittedRev.Load()
 		if floorRev > 0 {
-			rctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			rctx, cancel := context.WithTimeout(ctx, 2000*time.Millisecond)
 			resp, err := m.cli.Get(rctx, key)
 			cancel()
 			if err == nil && resp != nil && resp.Header != nil {
@@ -473,6 +474,6 @@ func main() {
 
 	for {
 		profile := sampleSwarmProfile()
-		runSwarmEpoch(profile, 500*time.Millisecond, members, quorumCli, &maxCommittedRev)
+		runSwarmEpoch(profile, 1500*time.Millisecond, members, quorumCli, &maxCommittedRev)
 	}
 }
