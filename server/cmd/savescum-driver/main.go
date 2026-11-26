@@ -20,6 +20,51 @@ type memberClient struct {
 	cli      *clientv3.Client
 }
 
+// SwarmProfile implements Groce et al. (ISSTA 2012) Swarm Testing:
+// each branch draws a distinct subset of features, concurrency, and pacing
+// from deterministic /dev/urandom instead of running every feature uniformly.
+type SwarmProfile struct {
+	WriteWorkers        int
+	WritePaceMs         int
+	KeySpace            int
+	EnableDeletes       bool
+	EnableCompaction    bool
+	EnableLinReads      bool
+	ReadWorkers         int
+	EnableFutureWatches bool
+}
+
+func sampleSwarmProfile() SwarmProfile {
+	writeWorkerChoices := []int{1, 2, 4, 8}
+	writePaceChoices := []int{0, 2, 8, 25}
+	keySpaceChoices := []int{2, 8, 32}
+	readWorkerChoices := []int{1, 4}
+
+	p := SwarmProfile{
+		WriteWorkers:        writeWorkerChoices[savescum.RandomU32()%uint32(len(writeWorkerChoices))],
+		WritePaceMs:         writePaceChoices[savescum.RandomU32()%uint32(len(writePaceChoices))],
+		KeySpace:            keySpaceChoices[savescum.RandomU32()%uint32(len(keySpaceChoices))],
+		EnableDeletes:       (savescum.RandomU32() & 1) == 1,
+		EnableCompaction:    (savescum.RandomU32() & 1) == 1,
+		EnableLinReads:      (savescum.RandomU32() & 1) == 1,
+		ReadWorkers:         readWorkerChoices[savescum.RandomU32()%uint32(len(readWorkerChoices))],
+		EnableFutureWatches: (savescum.RandomU32() & 1) == 1,
+	}
+	return p
+}
+
+func (p SwarmProfile) Tag() string {
+	b := func(v bool) int {
+		if v {
+			return 1
+		}
+		return 0
+	}
+	return fmt.Sprintf("w%d_p%d_k%d_d%d_c%d_r%d_f%d",
+		p.WriteWorkers, p.WritePaceMs, p.KeySpace,
+		b(p.EnableDeletes), b(p.EnableCompaction), b(p.EnableLinReads), b(p.EnableFutureWatches))
+}
+
 func parseMembers() []string {
 	raw := strings.TrimSpace(os.Getenv("ETCD_ENDPOINTS"))
 	if raw == "" {
@@ -85,7 +130,7 @@ func waitForCluster(members []*memberClient, quorumCli *clientv3.Client) int64 {
 	return 0
 }
 
-func runWatchVerifier(
+func runPersistentWatchVerifier(
 	m *memberClient,
 	initialStartRev int64,
 	warmupRev int64,
@@ -109,11 +154,7 @@ func runWatchVerifier(
 
 		for resp := range wch {
 			if err := resp.Err(); err != nil {
-				log.Printf("driver: watch %s closed with err=%v (lastEventModRev=%d)", m.name, err, lastEventModRev)
 				break
-			}
-			if resp.Created {
-				log.Printf("driver: watch %s created startRev=%d headerRev=%d", m.name, startRev, resp.Header.Revision)
 			}
 			for _, ev := range resp.Events {
 				modRev := ev.Kv.ModRevision
@@ -128,7 +169,7 @@ func runWatchVerifier(
 						"watchStartRev": startRev,
 						"gotModRev":     modRev,
 						"respHeaderRev": resp.Header.Revision,
-						"issue":         "etcd-io/etcd#20221",
+						"watchKind":     "persistent",
 					})
 				} else {
 					savescum.Always("etcd_watch_start_rev_bound", true, nil)
@@ -146,12 +187,13 @@ func runWatchVerifier(
 						"respHeaderRev":   resp.Header.Revision,
 						"watchStartRev":   startRev,
 						"reconnects":      reconnects,
-						"issue":           "etcd-io/etcd#15271",
 					})
 				} else {
 					lastEventModRev = modRev
 					savescum.Always("etcd_watch_revision_monotonic", true, nil)
-					savescum.Maximize("watch_rev_"+m.name, modRev)
+					if modRev%15 == 0 {
+						savescum.Maximize("watch_rev_bucket_"+m.name, modRev/15)
+					}
 				}
 
 				if !warmupSignaled && modRev >= warmupRev {
@@ -163,7 +205,6 @@ func runWatchVerifier(
 
 		cancel()
 		reconnects++
-		savescum.Explore("watch_reconnect", fmt.Sprintf("%s_r%d", m.name, minInt(reconnects, 6)))
 		if lastEventModRev > 0 {
 			startRev = lastEventModRev + 1
 		} else if committed := maxCommittedRev.Load(); committed > startRev {
@@ -173,66 +214,208 @@ func runWatchVerifier(
 	}
 }
 
-func runWriter(workerID int, quorumCli *clientv3.Client, maxCommittedRev *atomic.Int64) {
+func runFutureWatchWorker(ctx context.Context, members []*memberClient, maxCommittedRev *atomic.Int64) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		m := members[savescum.RandomU32()%uint32(len(members))]
+		committed := maxCommittedRev.Load()
+		offset := int64(1 + (savescum.RandomU32() % 6))
+		startRev := committed + offset
+
+		wctx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+		wch := m.cli.Watch(wctx, "k/", clientv3.WithPrefix(), clientv3.WithRev(startRev))
+		for resp := range wch {
+			if resp.Err() != nil {
+				break
+			}
+			for _, ev := range resp.Events {
+				if ev.Kv.ModRevision < startRev {
+					log.Printf("driver: BUG future_watch_old_event member=%s key=%s startRev=%d gotModRev=%d headerRev=%d",
+						m.name, string(ev.Kv.Key), startRev, ev.Kv.ModRevision, resp.Header.Revision)
+					savescum.Always("etcd_watch_start_rev_bound", false, map[string]any{
+						"member":        m.name,
+						"key":           string(ev.Kv.Key),
+						"watchStartRev": startRev,
+						"gotModRev":     ev.Kv.ModRevision,
+						"delta":         startRev - ev.Kv.ModRevision,
+						"respHeaderRev": resp.Header.Revision,
+						"watchKind":     "future_rev",
+					})
+				} else {
+					savescum.Always("etcd_watch_start_rev_bound", true, nil)
+				}
+			}
+		}
+		cancel()
+		time.Sleep(30 * time.Millisecond)
+	}
+}
+
+func runWriter(
+	ctx context.Context,
+	workerID int,
+	profile SwarmProfile,
+	quorumCli *clientv3.Client,
+	maxCommittedRev *atomic.Int64,
+) {
 	seq := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		seq++
-		key := fmt.Sprintf("k/%d", savescum.RandomU32()%8)
-		val := fmt.Sprintf("w%d-s%d-%08x", workerID, seq, savescum.RandomU32())
-		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-		resp, err := quorumCli.Put(ctx, key, val)
+		key := fmt.Sprintf("k/%d", savescum.RandomU32()%uint32(profile.KeySpace))
+		opCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+		var rev int64
+		if profile.EnableDeletes && (savescum.RandomU32()%4) == 0 {
+			resp, err := quorumCli.Delete(opCtx, key)
+			if err == nil && resp != nil && resp.Header != nil {
+				rev = resp.Header.Revision
+			}
+		} else {
+			val := fmt.Sprintf("w%d-s%d-%08x", workerID, seq, savescum.RandomU32())
+			resp, err := quorumCli.Put(opCtx, key, val)
+			if err == nil && resp != nil && resp.Header != nil {
+				rev = resp.Header.Revision
+			}
+		}
 		cancel()
-		if err == nil && resp != nil && resp.Header != nil {
-			rev := resp.Header.Revision
+
+		if rev > 0 {
 			for {
 				prev := maxCommittedRev.Load()
 				if rev <= prev || maxCommittedRev.CompareAndSwap(prev, rev) {
 					break
 				}
 			}
-			if rev%5 == 0 {
-				savescum.Maximize("driver_committed_rev_bucket", rev/5)
+			if rev%20 == 0 {
+				savescum.Maximize("driver_committed_rev_bucket", rev/20)
 			}
 		}
-		time.Sleep(3 * time.Millisecond)
+		if profile.WritePaceMs > 0 {
+			time.Sleep(time.Duration(profile.WritePaceMs) * time.Millisecond)
+		}
 	}
 }
 
-func runLinearizableReader(members []*memberClient, maxCommittedRev *atomic.Int64) {
-	idx := 0
+func runCompactor(ctx context.Context, quorumCli *clientv3.Client, maxCommittedRev *atomic.Int64) {
+	var lastCompacted int64
 	for {
-		m := members[idx%len(members)]
-		idx++
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
+		cur := maxCommittedRev.Load()
+		target := cur - 15
+		if target > lastCompacted && target > 2 {
+			cctx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+			_, err := quorumCli.Compact(cctx, target)
+			cancel()
+			if err == nil {
+				lastCompacted = target
+				savescum.Reachable("driver_compacted")
+			}
+		}
+	}
+}
+
+func runLinearizableReader(
+	ctx context.Context,
+	members []*memberClient,
+	keySpace int,
+	maxCommittedRev *atomic.Int64,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		m := members[savescum.RandomU32()%uint32(len(members))]
+		key := fmt.Sprintf("k/%d", savescum.RandomU32()%uint32(keySpace))
 		floorRev := maxCommittedRev.Load()
 		if floorRev > 0 {
-			ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-			resp, err := m.cli.Get(ctx, "k/0")
+			rctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			resp, err := m.cli.Get(rctx, key)
 			cancel()
 			if err == nil && resp != nil && resp.Header != nil {
 				if resp.Header.Revision < floorRev {
-					log.Printf("driver: BUG linearizable_read_monotonic member=%s minExpectedRev=%d gotHeaderRev=%d",
-						m.name, floorRev, resp.Header.Revision)
+					log.Printf("driver: BUG linearizable_read_monotonic member=%s key=%s minExpectedRev=%d gotHeaderRev=%d",
+						m.name, key, floorRev, resp.Header.Revision)
 					savescum.Always("etcd_linearizable_read_monotonic", false, map[string]any{
 						"member":         m.name,
+						"key":            key,
 						"minExpectedRev": floorRev,
 						"gotHeaderRev":   resp.Header.Revision,
 						"staleDelta":     floorRev - resp.Header.Revision,
-						"issue":          "etcd-io/etcd#20418",
 					})
 				} else {
 					savescum.Always("etcd_linearizable_read_monotonic", true, nil)
 				}
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(15 * time.Millisecond)
 	}
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
+func runSwarmEpoch(
+	profile SwarmProfile,
+	duration time.Duration,
+	members []*memberClient,
+	quorumCli *clientv3.Client,
+	maxCommittedRev *atomic.Int64,
+) {
+	log.Printf("driver: swarm epoch profile=%s", profile.Tag())
+	savescum.Explore("swarm_profile", profile.Tag())
+
+	ctx, cancel := context.WithTimeout(context.Background(), duration)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for w := 1; w <= profile.WriteWorkers; w++ {
+		workerID := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runWriter(ctx, workerID, profile, quorumCli, maxCommittedRev)
+		}()
 	}
-	return b
+
+	if profile.EnableLinReads {
+		for r := 0; r < profile.ReadWorkers; r++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				runLinearizableReader(ctx, members, profile.KeySpace, maxCommittedRev)
+			}()
+		}
+	}
+
+	if profile.EnableFutureWatches {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runFutureWatchWorker(ctx, members, maxCommittedRev)
+		}()
+	}
+
+	if profile.EnableCompaction {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runCompactor(ctx, quorumCli, maxCommittedRev)
+		}()
+	}
+
+	wg.Wait()
 }
 
 func main() {
@@ -261,10 +444,9 @@ func main() {
 	warmupReady := make(chan struct{}, len(members))
 	warmupTargetRev := initRev + 1
 	for _, m := range members {
-		go runWatchVerifier(m, initRev, warmupTargetRev, warmupReady, &maxCommittedRev)
+		go runPersistentWatchVerifier(m, initRev, warmupTargetRev, warmupReady, &maxCommittedRev)
 	}
 
-	// Give watchers a moment to register on all 3 members, then emit warmup write.
 	time.Sleep(80 * time.Millisecond)
 	for attempt := 1; attempt <= 20; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -277,7 +459,6 @@ func main() {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Wait for all 3 per-member watchers to be synced and receiving live events.
 	deadline := time.After(5 * time.Second)
 	for i := 0; i < len(members); i++ {
 		select {
@@ -290,18 +471,8 @@ func main() {
 	log.Printf("driver: all %d member watches synced; signaling setup_complete", len(members))
 	savescum.SetupComplete()
 
-	var wg sync.WaitGroup
-	wg.Add(5)
-	for w := 1; w <= 4; w++ {
-		workerID := w
-		go func() {
-			defer wg.Done()
-			runWriter(workerID, quorumCli, &maxCommittedRev)
-		}()
+	for {
+		profile := sampleSwarmProfile()
+		runSwarmEpoch(profile, 500*time.Millisecond, members, quorumCli, &maxCommittedRev)
 	}
-	go func() {
-		defer wg.Done()
-		runLinearizableReader(members, &maxCommittedRev)
-	}()
-	wg.Wait()
 }

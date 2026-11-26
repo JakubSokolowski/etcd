@@ -39,7 +39,6 @@ import (
 	"go.etcd.io/etcd/server/v3/config"
 	"go.etcd.io/etcd/server/v3/etcdserver/apply"
 	"go.etcd.io/etcd/server/v3/etcdserver/errors"
-	"go.etcd.io/etcd/server/v3/savescum"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/membershippb"
@@ -948,9 +947,6 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, toApply *toApply) {
 	applySnapshotInProgress.Inc()
 
 	lg := s.Logger()
-	savescum.Reachable("etcd_raft_apply_snapshot")
-	savescum.Explore("etcd_snapshot_applied", fmt.Sprintf("%s_idx_%d", s.Cfg.Name, toApply.snapshot.Metadata.Index/10))
-	savescum.Maximize("etcd_snapshot_applied_index", int64(toApply.snapshot.Metadata.Index))
 	lg.Info(
 		"applying snapshot",
 		zap.Uint64("current-snapshot-index", ep.snapi),
@@ -1154,8 +1150,6 @@ func (s *EtcdServer) triggerSnapshot(ep *etcdProgress) {
 
 	s.snapshot(ep.appliedi, ep.confState)
 	ep.snapi = ep.appliedi
-	savescum.Reachable("etcd_raft_trigger_snapshot")
-	savescum.Maximize("etcd_snapshot_triggered_index", int64(ep.snapi))
 }
 
 func (s *EtcdServer) shouldSnapshot(ep *etcdProgress) bool {

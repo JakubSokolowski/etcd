@@ -10,15 +10,15 @@ services:
       - --data-dir=/etcd-data/member
       - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
       - --initial-cluster-state=new
-      - --initial-cluster-token=savescum-etcd-15271
+      - --initial-cluster-token=savescum-etcd-swarm
       - --listen-peer-urls=http://0.0.0.0:2380
       - --initial-advertise-peer-urls=http://etcd1:2380
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd1:2379
-      - --heartbeat-interval=40
-      - --election-timeout=200
-      - --snapshot-count=8
-      - --experimental-snapshot-catchup-entries=3
+      - --heartbeat-interval=100
+      - --election-timeout=500
+      - --snapshot-count=50
+      - --experimental-snapshot-catchup-entries=100
       - --quota-backend-bytes=67108864
       - --logger=zap
       - --log-level=warn
@@ -36,15 +36,15 @@ services:
       - --data-dir=/etcd-data/member
       - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
       - --initial-cluster-state=new
-      - --initial-cluster-token=savescum-etcd-15271
+      - --initial-cluster-token=savescum-etcd-swarm
       - --listen-peer-urls=http://0.0.0.0:2380
       - --initial-advertise-peer-urls=http://etcd2:2380
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd2:2379
-      - --heartbeat-interval=40
-      - --election-timeout=200
-      - --snapshot-count=8
-      - --experimental-snapshot-catchup-entries=3
+      - --heartbeat-interval=100
+      - --election-timeout=500
+      - --snapshot-count=50
+      - --experimental-snapshot-catchup-entries=100
       - --quota-backend-bytes=67108864
       - --logger=zap
       - --log-level=warn
@@ -60,15 +60,15 @@ services:
       - --data-dir=/etcd-data/member
       - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
       - --initial-cluster-state=new
-      - --initial-cluster-token=savescum-etcd-15271
+      - --initial-cluster-token=savescum-etcd-swarm
       - --listen-peer-urls=http://0.0.0.0:2380
       - --initial-advertise-peer-urls=http://etcd3:2380
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd3:2379
-      - --heartbeat-interval=40
-      - --election-timeout=200
-      - --snapshot-count=8
-      - --experimental-snapshot-catchup-entries=3
+      - --heartbeat-interval=100
+      - --election-timeout=500
+      - --snapshot-count=50
+      - --experimental-snapshot-catchup-entries=100
       - --quota-backend-bytes=67108864
       - --logger=zap
       - --log-level=warn
@@ -90,8 +90,6 @@ services:
       savescum.role: driver
       savescum.setup_complete: manual
       savescum.faults.target: "false"
-      savescum.faults.min_interval_ms: "250"
-      savescum.faults.max_interval_ms: "450"
       savescum.faults.power_loss_volume_mib: "64"
 
 volumes:
