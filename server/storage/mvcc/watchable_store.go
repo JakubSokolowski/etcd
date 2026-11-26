@@ -448,12 +448,13 @@ func (s *watchableStore) notify(rev int64, evs []mvccpb.Event) {
 			pendingEventsGauge.Add(float64(len(eb.evs)))
 		} else {
 			// move slow watcher to victims
-			w.minRev = rev + 1
 			w.victim = true
 			victim[w] = eb
 			s.synced.delete(w)
 			slowWatcherGauge.Inc()
 		}
+		// Upstream fix for etcd-io/etcd#15271 (PR #15492): always update minRev.
+		w.minRev = rev + 1
 	}
 	s.addVictim(victim)
 }
